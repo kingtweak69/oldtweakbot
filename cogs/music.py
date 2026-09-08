@@ -260,16 +260,23 @@ class Music(commands.Cog):
     async def cog_load(self):
         self._register_capabilities()
         import config
+
+        is_secure = str(getattr(config, "LAVALINK_SECURE", False)).lower() in ("true", "1", "yes")
+        scheme = "https" if is_secure else "http"
+        host = getattr(config, "LAVALINK_HOST", "localhost")
+        port = getattr(config, "LAVALINK_PORT", 2333)
+        node_uri = f"{scheme}://{host}:{port}"
+
         self.refresh_controllers.start()
         for attempt in range(1, LAVALINK_CONNECT_RETRIES + 1):
             try:
                 node = wavelink.Node(
-                    uri=f"{'https' if getattr(config, 'LAVALINK_SECURE', False) else 'http'}://{config.LAVALINK_HOST}:{config.LAVALINK_PORT}",
+                    uri=node_uri,
                     password=config.LAVALINK_PASSWORD,
                 )
                 await wavelink.Pool.connect(nodes=[node], client=self.bot, cache_capacity=100)
                 self._connected = True
-                log.info("Connected to Lavalink at %s:%s", config.LAVALINK_HOST, config.LAVALINK_PORT)
+                log.info("Connected to Lavalink at %s", node_uri)
                 return
             except Exception as exc:
                 log.warning("Lavalink connect attempt %d failed: %s", attempt, exc)
@@ -791,8 +798,11 @@ class Music(commands.Cog):
     @is_in_vc()
     async def play(self, ctx: commands.Context, *, query: str = None):
         """Play a track, local file, attachment, or add it to the queue."""
+        # Immediate defer prevents Discord interaction timeout (404 Unknown Interaction)
+        await ctx.defer()
+
         # 1. Check for attached files
-        if ctx.message.attachments:
+        if ctx.message and ctx.message.attachments:
             attachment = ctx.message.attachments[0]
             if attachment.filename.lower().endswith(('.mp3', '.wav', '.flac', '.m4a', '.ogg')):
                 return await self._play_local_file(ctx, attachment.url)
@@ -802,7 +812,7 @@ class Music(commands.Cog):
         if not query:
             return await ctx.send(embed=error_embed("Provide a track name, file path, or upload an audio file."))
 
-        # 2. Check for local server file paths
+        # 2. Check for local system file paths
         cleaned_query = query.strip('"\'')
         if os.path.exists(cleaned_query) and os.path.isfile(cleaned_query):
             return await self._play_local_file(ctx, cleaned_query)
@@ -812,10 +822,9 @@ class Music(commands.Cog):
         if not isinstance(player, MusicPlayer):
             return await self._play_local_file(ctx, query)
 
-        async with ctx.typing():
-            tracks = await wavelink.Playable.search(query)
-            if not tracks:
-                return await ctx.send(embed=error_embed(f"No results for `{query}`."))
+        tracks = await wavelink.Playable.search(query)
+        if not tracks:
+            return await ctx.send(embed=error_embed(f"No results for `{query}`."))
 
         if isinstance(tracks, wavelink.Playlist):
             for t in tracks.tracks:
